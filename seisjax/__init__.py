@@ -79,6 +79,9 @@ from .geometric import (
     local_structural_entropy
 )
 
+# Import utility functions
+from . import utils
+
 __all__ = [
     # Complex trace attributes
     "analytic_signal",
