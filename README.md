@@ -79,6 +79,7 @@ print("Instantaneous Phase:", trace_phase)
 - `dominant_frequency`
 - `spectral_slope`
 - `spectral_bandwidth`
+- `spectral_decompostion`
 
 ### Geometric Attributes
 - `dip`
