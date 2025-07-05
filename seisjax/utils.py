@@ -20,46 +20,76 @@ def _jax_gradient(f: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
     if axis < 0:
         axis = f.ndim + axis
         
-    # Use central differences for interior points and forward/backward for edges
-    # Move axis to last position for easier processing
-    if axis != f.ndim - 1:
-        axes = list(range(f.ndim))
-        axes[axis], axes[-1] = axes[-1], axes[axis]
-        f = jnp.transpose(f, axes)
+    # Handle different axis cases statically (same as in attributes.py)
+    if axis == 0:
+        # Gradient along first axis
+        if f.ndim == 1:
+            return _gradient_1d(f)
+        elif f.ndim == 2:
+            return jax.vmap(_gradient_1d, in_axes=1, out_axes=1)(f)
+        else:  # 3D
+            return jax.vmap(jax.vmap(_gradient_1d, in_axes=1, out_axes=1), in_axes=2, out_axes=2)(f)
     
-    # Get the size along the gradient axis
-    n = f.shape[-1]
+    elif axis == 1:
+        # Gradient along second axis
+        if f.ndim == 2:
+            return jax.vmap(_gradient_1d, in_axes=0, out_axes=0)(f)
+        else:  # 3D
+            return jax.vmap(jax.vmap(_gradient_1d, in_axes=0, out_axes=0), in_axes=2, out_axes=2)(f)
     
-    if n < 2:
-        return jnp.zeros_like(f)
-    elif n == 2:
-        # Only two points, use simple difference
-        return jnp.diff(f, axis=-1)
+    elif axis == 2:
+        # Gradient along third axis
+        return jax.vmap(jax.vmap(_gradient_1d, in_axes=0, out_axes=0), in_axes=0, out_axes=0)(f)
+    
     else:
-        # Use central differences for interior, forward/backward for edges
+        # For last axis
+        if f.ndim == 1:
+            return _gradient_1d(f)
+        elif f.ndim == 2:
+            return jax.vmap(_gradient_1d, in_axes=0, out_axes=0)(f)
+        else:  # 3D
+            return jax.vmap(jax.vmap(_gradient_1d, in_axes=0, out_axes=0), in_axes=0, out_axes=0)(f)
+
+
+@jax.jit
+def _gradient_1d(f: jnp.ndarray) -> jnp.ndarray:
+    """
+    Compute gradient for 1D array using central differences.
+    """
+    n = f.shape[0]
+    
+    def grad_too_short():
+        return jnp.zeros_like(f)
+    
+    def grad_two_points():
+        diff_val = f[1] - f[0]
+        return jnp.array([diff_val, diff_val])
+    
+    def grad_normal():
         # Forward difference for first point
-        forward = f[..., 1] - f[..., 0]
+        forward = f[1] - f[0]
         
         # Central differences for interior points
-        central = (f[..., 2:] - f[..., :-2]) / 2.0
+        central = (f[2:] - f[:-2]) / 2.0
         
-        # Backward difference for last point  
-        backward = f[..., -1] - f[..., -2]
+        # Backward difference for last point
+        backward = f[-1] - f[-2]
         
-        # Combine
-        result = jnp.concatenate([
-            jnp.expand_dims(forward, -1),
+        return jnp.concatenate([
+            jnp.array([forward]),
             central,
-            jnp.expand_dims(backward, -1)
-        ], axis=-1)
+            jnp.array([backward])
+        ])
     
-    # Move axis back to original position
-    if axis != f.ndim - 1:
-        inv_axes = list(range(f.ndim))
-        inv_axes[axis], inv_axes[-1] = inv_axes[-1], inv_axes[axis]
-        result = jnp.transpose(result, inv_axes)
-    
-    return result
+    return lax.cond(
+        n < 2,
+        grad_too_short,
+        lambda: lax.cond(
+            n == 2,
+            grad_two_points,
+            grad_normal
+        )
+    )
 
 
 def rescale_volume(
