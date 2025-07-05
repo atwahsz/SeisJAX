@@ -16,6 +16,7 @@ from jax.scipy import signal
 def _create_window(window_type: str, nperseg: int) -> jnp.ndarray:
     """
     Create window function since JAX doesn't have all window types.
+    Note: This should be called before JIT compilation to avoid string comparison issues.
     
     Args:
         window_type: Type of window ('hann', 'hamming', 'blackman', 'bartlett')
@@ -520,40 +521,18 @@ def peak_frequency(
     return dominant_frequency(x, axis=axis, fs=fs, window_length=window_length)
 
 
-@jax.jit
-def spectral_decomposition(
+@jax.jit 
+def _spectral_decomposition_jit(
     x: jnp.ndarray,
-    fs: float = 250.0,
-    window_length: float = 0.2,
-    hop_length: int = 1,
-    window_type: str = 'hann',
+    window: jnp.ndarray,
+    fs: float,
+    hop_length: int,
     axis: int = -1
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Perform spectral decomposition on seismic data using Short-Time Fourier Transform (STFT).
-    
-    This function computes the time-frequency representation of seismic data,
-    allowing analysis of frequency content that varies with time.
-    
-    Args:
-        x: Input seismic data (can be 1D, 2D, or 3D)
-        fs: Sampling frequency in Hz
-        window_length: Length of the STFT window in seconds
-        hop_length: Step size for the STFT window
-        window_type: Type of window function ('hann', 'hamming', 'blackman', 'bartlett')
-        axis: Axis along which to compute the STFT (time axis)
-        
-    Returns:
-        Tuple of (frequencies, times, spectrogram)
-        - frequencies: Frequency array
-        - times: Time array
-        - spectrogram: Complex-valued STFT coefficients
+    JIT-compiled spectral decomposition computation.
     """
-    # Calculate window size in samples
-    nperseg = int(fs * window_length)
-    
-    # Create window function
-    window = _create_window(window_type, nperseg)
+    nperseg = len(window)
     
     # Move time axis to the last dimension for easier processing
     x = jnp.moveaxis(x, axis, -1)
@@ -611,7 +590,44 @@ def spectral_decomposition(
     return frequencies, times, stft_result
 
 
-@jax.jit
+def spectral_decomposition(
+    x: jnp.ndarray,
+    fs: float = 250.0,
+    window_length: float = 0.2,
+    hop_length: int = 1,
+    window_type: str = 'hann',
+    axis: int = -1
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Perform spectral decomposition on seismic data using Short-Time Fourier Transform (STFT).
+    
+    This function computes the time-frequency representation of seismic data,
+    allowing analysis of frequency content that varies with time.
+    
+    Args:
+        x: Input seismic data (can be 1D, 2D, or 3D)
+        fs: Sampling frequency in Hz
+        window_length: Length of the STFT window in seconds
+        hop_length: Step size for the STFT window
+        window_type: Type of window function ('hann', 'hamming', 'blackman', 'bartlett')
+        axis: Axis along which to compute the STFT (time axis)
+        
+    Returns:
+        Tuple of (frequencies, times, spectrogram)
+        - frequencies: Frequency array
+        - times: Time array
+        - spectrogram: Complex-valued STFT coefficients
+    """
+    # Calculate window size in samples
+    nperseg = int(fs * window_length)
+    
+    # Create window function outside JIT compilation
+    window = _create_window(window_type, nperseg)
+    
+    # Call JIT-compiled function
+    return _spectral_decomposition_jit(x, window, fs, hop_length, axis)
+
+
 def instantaneous_amplitude_spectrum(
     x: jnp.ndarray,
     fs: float = 250.0,
@@ -636,7 +652,6 @@ def instantaneous_amplitude_spectrum(
     return jnp.abs(stft)
 
 
-@jax.jit
 def time_frequency_decomposition(
     x: jnp.ndarray,
     fs: float = 250.0,
@@ -666,21 +681,22 @@ def time_frequency_decomposition(
     # Compute spectral decomposition
     freqs, times, stft = spectral_decomposition(x, fs, axis=axis)
     
-    # Extract amplitude for each frequency band
-    frequency_volumes = []
-    
-    for target_freq in frequencies:
+    # Extract amplitude for each frequency band using vectorized operations
+    def extract_frequency_band(target_freq):
         # Find closest frequency bin
         freq_idx = jnp.argmin(jnp.abs(freqs - target_freq))
-        
         # Extract amplitude at this frequency
-        freq_volume = jnp.abs(stft[..., freq_idx, :])
-        frequency_volumes.append(freq_volume)
+        return jnp.abs(stft[..., freq_idx, :])
     
-    return frequencies, jnp.stack(frequency_volumes, axis=-1)
+    # Vectorize over all target frequencies
+    frequency_volumes = jax.vmap(extract_frequency_band)(frequencies)
+    
+    # Transpose to get the right shape
+    frequency_volumes = jnp.transpose(frequency_volumes, (1, 2, 0))
+    
+    return frequencies, frequency_volumes
 
 
-@jax.jit
 def rgb_frequency_blend(
     x: jnp.ndarray,
     fs: float = 250.0,

@@ -2,12 +2,14 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 
 def _check_axis(axis: int, ndim: int) -> None:
     """Helper to ensure the specified axis is valid for the array dimensions."""
-    if not -ndim <= axis < ndim:
-        raise ValueError(f"Axis {axis} is out of bounds for an array with {ndim} dimensions.")
+    # Note: JAX will handle axis validation naturally, so we skip dynamic checks
+    # inside JIT-compiled functions to avoid TracerBoolConversionError
+    pass
 
 
 def _hilbert_jax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
@@ -32,15 +34,13 @@ def _hilbert_jax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
     
     # Create the Hilbert transform filter
     h = jnp.zeros(N)
-    if N % 2 == 0:
-        # Even length
-        h = h.at[0].set(1)
-        h = h.at[1:N//2].set(2)
-        h = h.at[N//2].set(1)
-    else:
-        # Odd length
-        h = h.at[0].set(1)
-        h = h.at[1:(N+1)//2].set(2)
+    # Use JAX conditional to avoid TracerBoolConversionError
+    h = h.at[0].set(1)
+    h = lax.cond(
+        N % 2 == 0,
+        lambda: h.at[1:N//2].set(2).at[N//2].set(1),  # Even length
+        lambda: h.at[1:(N+1)//2].set(2)                # Odd length
+    )
     
     # Apply the filter
     X_filtered = X * h
@@ -71,7 +71,6 @@ def analytic_signal(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
     Returns:
         The complex-valued analytic signal.
     """
-    _check_axis(axis, x.ndim)
     return _hilbert_jax(x, axis=axis)
 
 
