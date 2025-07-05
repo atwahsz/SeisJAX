@@ -58,31 +58,47 @@ def _power_spectrum_jit(
     step = nperseg - noverlap
     n_segments = (n_samples - noverlap) // step
     
+    # Ensure we have at least one segment
+    if n_segments < 1:
+        n_segments = 1
+    
     # Create frequency array
     freqs = jnp.fft.fftfreq(nperseg, 1.0 / fs)[:nperseg // 2 + 1]
     
-    # Function to process each segment
+    # Pad the input array to handle boundary conditions
+    if axis == 0:
+        x_padded = jnp.pad(x, ((0, nperseg), *(((0, 0),) * (x.ndim - 1))))
+    elif axis == 1:
+        x_padded = jnp.pad(x, ((0, 0), (0, nperseg), *(((0, 0),) * (x.ndim - 2))))
+    else:  # axis == -1 or axis == 2
+        if x.ndim == 2:
+            x_padded = jnp.pad(x, ((0, 0), (0, nperseg)))
+        else:  # 3D case
+            x_padded = jnp.pad(x, ((0, 0), (0, 0), (0, nperseg)))
+    
+    # Function to process each segment using JAX-compatible slicing
     def process_segment(i):
-        start = i * step
-        end = start + nperseg
+        start_idx = i * step
         
-        # Extract segment based on axis
+        # Use lax.dynamic_slice for JAX-compatible slicing with traced indices
         if axis == 0:
-            segment = x[start:end]
-        elif axis == 1:
-            segment = x[:, start:end]
-        else:  # axis == -1 or axis == 2
-            segment = x[..., start:end]
-        
-        # Apply window
-        if axis == 0:
+            # Extract segment along first axis
+            segment = lax.dynamic_slice(x_padded, (start_idx,), (nperseg,))
             windowed = segment * window
         elif axis == 1:
+            # Extract segment along second axis
+            segment = lax.dynamic_slice(x_padded, (0, start_idx), (x.shape[0], nperseg))
             windowed = segment * window[None, :]
         else:  # axis == -1 or axis == 2
-            windowed = segment * window
+            # Extract segment along last axis
+            if x.ndim == 2:
+                segment = lax.dynamic_slice(x_padded, (0, start_idx), (x.shape[0], nperseg))
+                windowed = segment * window
+            else:  # 3D case
+                segment = lax.dynamic_slice(x_padded, (0, 0, start_idx), (x.shape[0], x.shape[1], nperseg))
+                windowed = segment * window
         
-        # Take FFT
+        # Take FFT along the windowed axis
         fft_result = jnp.fft.fft(windowed, axis=axis)
         
         # Get one-sided spectrum
@@ -96,13 +112,20 @@ def _power_spectrum_jit(
         # Compute power spectral density
         psd = jnp.abs(spectrum) ** 2
         
-        # Scale for one-sided spectrum
+        # Scale for one-sided spectrum (avoid first and last bins for 2x scaling)
+        scaling_start = 1
+        scaling_end = nperseg // 2
+        if nperseg % 2 == 0:
+            scaling_end = nperseg // 2  # Don't scale Nyquist frequency for even nperseg
+        else:
+            scaling_end = (nperseg + 1) // 2  # Scale all the way for odd nperseg
+        
         if axis == 0:
-            psd = psd.at[1:-1].multiply(2)
+            psd = psd.at[scaling_start:scaling_end].multiply(2)
         elif axis == 1:
-            psd = psd.at[:, 1:-1].multiply(2)
+            psd = psd.at[:, scaling_start:scaling_end].multiply(2)
         else:  # axis == -1 or axis == 2
-            psd = psd.at[..., 1:-1].multiply(2)
+            psd = psd.at[..., scaling_start:scaling_end].multiply(2)
         
         return psd
     
