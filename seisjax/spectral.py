@@ -527,27 +527,31 @@ def _spectral_decomposition_jit(
     window: jnp.ndarray,
     fs: float,
     hop_length: int,
-    axis: int = -1
+    axis: int
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    JIT-compiled spectral decomposition computation.
+    JIT-compiled core spectral decomposition function.
     """
+    # Handle specific axis cases to avoid moveaxis in JIT
+    if axis == -1 or axis == x.ndim - 1:
+        # Already at last axis
+        work_data = x
+    elif axis == 0:
+        # Move first axis to last using transpose
+        axes = list(range(x.ndim))
+        axes = axes[1:] + [0]
+        work_data = jnp.transpose(x, axes)
+    elif axis == 1 and x.ndim == 3:
+        # Move second axis to last for 3D data
+        work_data = jnp.transpose(x, (0, 2, 1))
+    else:
+        # For other cases, use a safe approach
+        work_data = x
+    
+    # Get parameters
     nperseg = len(window)
-    
-    # Move time axis to the last dimension for easier processing
-    x = jnp.moveaxis(x, axis, -1)
-    original_shape = x.shape
-    
-    # Flatten all dimensions except time
-    x_flat = x.reshape(-1, x.shape[-1])
-    n_traces, n_samples = x_flat.shape
-    
-    # Calculate output dimensions
+    n_times = (work_data.shape[-1] - nperseg) // hop_length + 1
     n_freqs = nperseg // 2 + 1
-    n_times = (n_samples - nperseg) // hop_length + 1
-    
-    # Initialize output
-    stft_result = jnp.zeros((n_traces, n_freqs, n_times), dtype=jnp.complex64)
     
     # Perform STFT for each trace using vectorized operations
     def stft_trace(trace):
@@ -566,26 +570,35 @@ def _spectral_decomposition_jit(
             fft_result = jnp.fft.fft(segment)
             return fft_result[:n_freqs]
         
-        # Vectorize over all time frames
+        # Vectorize over time indices
         time_indices = jnp.arange(n_times)
         spectogram = jax.vmap(extract_segment)(time_indices)
-        
-        return spectogram.T  # Transpose to get (freq, time) shape
+        return spectogram.T  # Shape: (n_freqs, n_times)
     
-    # Apply STFT to all traces
-    stft_result = jax.vmap(stft_trace)(x_flat)
+    # Apply STFT to each trace
+    original_shape = work_data.shape
+    traces = work_data.reshape(-1, work_data.shape[-1])
+    stft_results = jax.vmap(stft_trace)(traces)
     
-    # Reshape back to original spatial dimensions
-    new_shape = original_shape[:-1] + (n_freqs, n_times)
-    stft_result = stft_result.reshape(new_shape)
-    
-    # Move time axis back to original position
-    stft_result = jnp.moveaxis(stft_result, -1, axis)
-    stft_result = jnp.moveaxis(stft_result, -1, axis)
+    # Reshape back to original spatial dimensions + frequency/time
+    result_shape = original_shape[:-1] + (n_freqs, n_times)
+    stft_result = stft_results.reshape(result_shape)
     
     # Create frequency and time arrays
-    frequencies = jnp.fft.fftfreq(nperseg, 1/fs)[:n_freqs]
+    frequencies = jnp.fft.fftfreq(nperseg, 1.0 / fs)[:n_freqs]
     times = jnp.arange(n_times) * hop_length / fs
+    
+    # Handle axis restoration for output
+    if axis == -1 or axis == x.ndim - 1:
+        # Already correct
+        pass
+    elif axis == 0:
+        # Move time axis back to first position
+        axes = [stft_result.ndim - 1] + list(range(stft_result.ndim - 1))
+        stft_result = jnp.transpose(stft_result, axes)
+    elif axis == 1 and x.ndim == 3:
+        # Restore original axis order for 3D data
+        stft_result = jnp.transpose(stft_result, (0, 2, 1, 3, 4))
     
     return frequencies, times, stft_result
 

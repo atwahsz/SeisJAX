@@ -10,6 +10,7 @@ from typing import Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax import lax
+from .utils import _jax_gradient
 
 
 def _sliding_window_3d(x: jnp.ndarray, window_shape: Tuple[int, int, int]) -> jnp.ndarray:
@@ -124,7 +125,9 @@ def eigenstructure_coherence(
         raise ValueError("Input must be a 3D array")
     
     # Compute gradients
-    dz, dy, dx = jnp.gradient(x)
+    dz = _jax_gradient(x, axis=0)
+    dy = _jax_gradient(x, axis=1)
+    dx = _jax_gradient(x, axis=2)
     
     # Compute structure tensor components
     nz, ny, nx = window_shape
