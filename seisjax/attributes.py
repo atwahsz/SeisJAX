@@ -2,13 +2,56 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.signal import hilbert
 
 
 def _check_axis(axis: int, ndim: int) -> None:
     """Helper to ensure the specified axis is valid for the array dimensions."""
     if not -ndim <= axis < ndim:
         raise ValueError(f"Axis {axis} is out of bounds for an array with {ndim} dimensions.")
+
+
+def _hilbert_jax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
+    """
+    Compute the Hilbert transform using JAX FFT operations.
+    
+    Args:
+        x: Real-valued input array
+        axis: Axis along which to compute the Hilbert transform
+        
+    Returns:
+        Complex-valued analytic signal
+    """
+    # Move the specified axis to the last position
+    x = jnp.moveaxis(x, axis, -1)
+    
+    # Get the length of the transform axis
+    N = x.shape[-1]
+    
+    # Compute FFT
+    X = jnp.fft.fft(x, axis=-1)
+    
+    # Create the Hilbert transform filter
+    h = jnp.zeros(N)
+    if N % 2 == 0:
+        # Even length
+        h = h.at[0].set(1)
+        h = h.at[1:N//2].set(2)
+        h = h.at[N//2].set(1)
+    else:
+        # Odd length
+        h = h.at[0].set(1)
+        h = h.at[1:(N+1)//2].set(2)
+    
+    # Apply the filter
+    X_filtered = X * h
+    
+    # Compute inverse FFT
+    analytic = jnp.fft.ifft(X_filtered, axis=-1)
+    
+    # Move the axis back to its original position
+    analytic = jnp.moveaxis(analytic, -1, axis)
+    
+    return analytic
 
 
 @jax.jit
@@ -29,7 +72,7 @@ def analytic_signal(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
         The complex-valued analytic signal.
     """
     _check_axis(axis, x.ndim)
-    return hilbert(x, axis=axis)
+    return _hilbert_jax(x, axis=axis)
 
 
 @jax.jit

@@ -13,6 +13,32 @@ from jax import lax
 from jax.scipy import signal
 
 
+def _create_window(window_type: str, nperseg: int) -> jnp.ndarray:
+    """
+    Create window function since JAX doesn't have all window types.
+    
+    Args:
+        window_type: Type of window ('hann', 'hamming', 'blackman', 'bartlett')
+        nperseg: Window length
+        
+    Returns:
+        Window array
+    """
+    n = jnp.arange(nperseg)
+    
+    if window_type == 'hann':
+        return 0.5 * (1 - jnp.cos(2 * jnp.pi * n / (nperseg - 1)))
+    elif window_type == 'hamming':
+        return 0.54 - 0.46 * jnp.cos(2 * jnp.pi * n / (nperseg - 1))
+    elif window_type == 'blackman':
+        return (0.42 - 0.5 * jnp.cos(2 * jnp.pi * n / (nperseg - 1)) + 
+                0.08 * jnp.cos(4 * jnp.pi * n / (nperseg - 1)))
+    elif window_type == 'bartlett':
+        return 1 - 2 * jnp.abs(n - (nperseg - 1) / 2) / (nperseg - 1)
+    else:
+        return jnp.ones(nperseg)  # rectangular window
+
+
 @jax.jit
 def power_spectrum(
     x: jnp.ndarray,
@@ -527,16 +553,7 @@ def spectral_decomposition(
     nperseg = int(fs * window_length)
     
     # Create window function
-    if window_type == 'hann':
-        window = jnp.hanning(nperseg)
-    elif window_type == 'hamming':
-        window = jnp.hamming(nperseg)  
-    elif window_type == 'blackman':
-        window = jnp.blackman(nperseg)
-    elif window_type == 'bartlett':
-        window = jnp.bartlett(nperseg)
-    else:
-        window = jnp.ones(nperseg)  # rectangular window
+    window = _create_window(window_type, nperseg)
     
     # Move time axis to the last dimension for easier processing
     x = jnp.moveaxis(x, axis, -1)
@@ -553,26 +570,28 @@ def spectral_decomposition(
     # Initialize output
     stft_result = jnp.zeros((n_traces, n_freqs, n_times), dtype=jnp.complex64)
     
-    # Perform STFT for each trace
+    # Perform STFT for each trace using vectorized operations
     def stft_trace(trace):
-        """Compute STFT for a single trace."""
-        spectogram = jnp.zeros((n_freqs, n_times), dtype=jnp.complex64)
-        
-        for i in range(n_times):
+        """Compute STFT for a single trace using vectorized operations."""
+        # Create all windowed segments at once
+        def extract_segment(i):
             start_idx = i * hop_length
             end_idx = start_idx + nperseg
-            
-            if end_idx <= len(trace):
-                # Extract windowed segment
-                segment = trace[start_idx:end_idx] * window
-                
-                # Compute FFT
-                fft_result = jnp.fft.fft(segment)
-                
-                # Take only positive frequencies
-                spectogram = spectogram.at[:, i].set(fft_result[:n_freqs])
+            # Use lax.dynamic_slice for JAX-compatible slicing
+            segment = lax.dynamic_slice(
+                jnp.pad(trace, (0, nperseg)), 
+                (start_idx,), 
+                (nperseg,)
+            ) * window
+            # Compute FFT and take positive frequencies
+            fft_result = jnp.fft.fft(segment)
+            return fft_result[:n_freqs]
         
-        return spectogram
+        # Vectorize over all time frames
+        time_indices = jnp.arange(n_times)
+        spectogram = jax.vmap(extract_segment)(time_indices)
+        
+        return spectogram.T  # Transpose to get (freq, time) shape
     
     # Apply STFT to all traces
     stft_result = jax.vmap(stft_trace)(x_flat)
