@@ -41,6 +41,87 @@ def _create_window(window_type: str, nperseg: int) -> jnp.ndarray:
 
 
 @jax.jit
+def _power_spectrum_jit(
+    x: jnp.ndarray,
+    window: jnp.ndarray,
+    nperseg: int,
+    noverlap: int,
+    fs: float,
+    axis: int
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    JAX-compatible power spectrum computation using Welch's method.
+    """
+    # Get input shape
+    n_samples = x.shape[axis]
+    
+    # Calculate number of segments
+    step = nperseg - noverlap
+    n_segments = (n_samples - noverlap) // step
+    
+    # Create frequency array
+    freqs = jnp.fft.fftfreq(nperseg, 1.0 / fs)[:nperseg // 2 + 1]
+    
+    # Function to process each segment
+    def process_segment(i):
+        start = i * step
+        end = start + nperseg
+        
+        # Extract segment based on axis
+        if axis == 0:
+            segment = x[start:end]
+        elif axis == 1:
+            segment = x[:, start:end]
+        else:  # axis == -1 or axis == 2
+            segment = x[..., start:end]
+        
+        # Apply window
+        if axis == 0:
+            windowed = segment * window
+        elif axis == 1:
+            windowed = segment * window[None, :]
+        else:  # axis == -1 or axis == 2
+            windowed = segment * window
+        
+        # Take FFT
+        fft_result = jnp.fft.fft(windowed, axis=axis)
+        
+        # Get one-sided spectrum
+        if axis == 0:
+            spectrum = fft_result[:nperseg // 2 + 1]
+        elif axis == 1:
+            spectrum = fft_result[:, :nperseg // 2 + 1]
+        else:  # axis == -1 or axis == 2
+            spectrum = fft_result[..., :nperseg // 2 + 1]
+        
+        # Compute power spectral density
+        psd = jnp.abs(spectrum) ** 2
+        
+        # Scale for one-sided spectrum
+        if axis == 0:
+            psd = psd.at[1:-1].multiply(2)
+        elif axis == 1:
+            psd = psd.at[:, 1:-1].multiply(2)
+        else:  # axis == -1 or axis == 2
+            psd = psd.at[..., 1:-1].multiply(2)
+        
+        return psd
+    
+    # Process all segments
+    if n_segments > 1:
+        segments = jax.vmap(process_segment)(jnp.arange(n_segments))
+        # Average across segments
+        psd = jnp.mean(segments, axis=0)
+    else:
+        psd = process_segment(0)
+    
+    # Normalize by sampling frequency and window power
+    window_power = jnp.sum(window ** 2)
+    psd = psd / (fs * window_power)
+    
+    return freqs, psd
+
+
 def power_spectrum(
     x: jnp.ndarray,
     axis: int = -1,
@@ -69,15 +150,11 @@ def power_spectrum(
     if noverlap is None:
         noverlap = nperseg // 2
     
-    # Use JAX's signal processing for power spectrum
-    freqs, psd = signal.welch(
-        x,
-        fs=fs,
-        window=window,
-        nperseg=nperseg,
-        noverlap=noverlap,
-        axis=axis
-    )
+    # Create window outside of JIT
+    window_array = _create_window(window, nperseg)
+    
+    # Use JAX-compatible power spectrum computation
+    freqs, psd = _power_spectrum_jit(x, window_array, nperseg, noverlap, fs, axis)
     
     return freqs, psd
 
@@ -110,9 +187,11 @@ def dominant_frequency(
     # Compute power spectrum
     freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
     
-    # Find dominant frequency
+    # Find dominant frequency using JAX-compatible method
     dom_freq_idx = jnp.argmax(psd, axis=axis)
-    dom_freq = freqs[dom_freq_idx]
+    
+    # Use jnp.take to avoid TracerIntegerConversionError
+    dom_freq = jnp.take(freqs, dom_freq_idx, axis=0)
     
     return dom_freq
 
@@ -270,10 +349,12 @@ def spectral_rolloff(
     cumsum_psd = jnp.cumsum(psd, axis=axis)
     total_energy = jnp.sum(psd, axis=axis, keepdims=True)
     
-    # Find rolloff frequency
+    # Find rolloff frequency using JAX-compatible method
     rolloff_energy = rolloff_percent * total_energy
     rolloff_idx = jnp.argmax(cumsum_psd >= rolloff_energy, axis=axis)
-    rolloff_freq = freqs[rolloff_idx]
+    
+    # Use jnp.take to avoid TracerIntegerConversionError
+    rolloff_freq = jnp.take(freqs, rolloff_idx, axis=0)
     
     return rolloff_freq
 
@@ -506,7 +587,10 @@ def peak_frequency(
     window_length: Optional[int] = None
 ) -> jnp.ndarray:
     """
-    Compute the peak frequency (frequency with maximum amplitude).
+    Compute the peak frequency of the signal.
+    
+    The peak frequency is the frequency bin with the maximum power
+    in the power spectrum.
     
     Args:
         x: Input signal
@@ -517,8 +601,19 @@ def peak_frequency(
     Returns:
         Peak frequency array
     """
-    # This is essentially the same as dominant_frequency
-    return dominant_frequency(x, axis=axis, fs=fs, window_length=window_length)
+    if window_length is None:
+        window_length = min(64, x.shape[axis])
+    
+    # Compute power spectrum
+    freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
+    
+    # Find peak frequency using JAX-compatible method
+    peak_idx = jnp.argmax(psd, axis=axis)
+    
+    # Use jnp.take to avoid TracerIntegerConversionError
+    peak_freq = jnp.take(freqs, peak_idx, axis=0)
+    
+    return peak_freq
 
 
 @jax.jit 
