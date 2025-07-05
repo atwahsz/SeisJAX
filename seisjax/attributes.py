@@ -135,8 +135,9 @@ def _unwrap_1d(p: jnp.ndarray) -> jnp.ndarray:
         # Find discontinuities (jumps greater than pi)
         dp_corrected = dp - 2 * jnp.pi * jnp.round(dp / (2 * jnp.pi))
         
-        # Integrate to get unwrapped phase
-        return jnp.concatenate([p[:1], p[0] + jnp.cumsum(dp_corrected)])
+        # Integrate to get unwrapped phase - fix shape consistency
+        unwrapped = jnp.concatenate([p[:1], p[:1] + jnp.cumsum(dp_corrected)])
+        return unwrapped
     
     def unwrap_short():
         return p
@@ -199,7 +200,8 @@ def _gradient_1d(f: jnp.ndarray) -> jnp.ndarray:
     
     def grad_two_points():
         diff_val = f[1] - f[0]
-        return jnp.array([diff_val, diff_val])
+        # Return same shape as input, not hardcoded shape
+        return jnp.full_like(f, diff_val)
     
     def grad_normal():
         # Forward difference for first point
@@ -218,13 +220,13 @@ def _gradient_1d(f: jnp.ndarray) -> jnp.ndarray:
         ])
     
     return lax.cond(
-        n < 2,
-        grad_too_short,
+        n < 3,
         lambda: lax.cond(
-            n == 2,
-            grad_two_points,
-            grad_normal
-        )
+            n < 1,
+            grad_too_short,
+            grad_two_points
+        ),
+        grad_normal
     )
 
 
@@ -311,7 +313,8 @@ def cosine_instantaneous_phase(
 
 def instantaneous_frequency(
     x: jnp.ndarray,
-    axis: int = -1
+    axis: int = -1,
+    fs: float = 1.0
 ) -> jnp.ndarray:
     """
     Compute the instantaneous frequency of a signal.
@@ -323,6 +326,7 @@ def instantaneous_frequency(
     Args:
         x: Input signal
         axis: Axis along which to compute the frequency
+        fs: Sampling frequency (default: 1.0)
         
     Returns:
         The instantaneous frequency of the signal.
@@ -333,8 +337,8 @@ def instantaneous_frequency(
     # Use custom gradient function
     freq = _jax_gradient(phi, axis=axis)
     
-    # Convert to frequency (assuming unit sampling rate)
-    return freq / (2 * jnp.pi)
+    # Convert to frequency with proper sampling rate
+    return (fs / (2 * jnp.pi)) * freq
 
 
 def instantaneous_bandwidth(
