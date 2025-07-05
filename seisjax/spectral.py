@@ -40,7 +40,6 @@ def _create_window(window_type: str, nperseg: int) -> jnp.ndarray:
         return jnp.ones(nperseg)  # rectangular window
 
 
-@jax.jit
 def _power_spectrum_jit(
     x: jnp.ndarray,
     window: jnp.ndarray,
@@ -159,7 +158,6 @@ def power_spectrum(
     return freqs, psd
 
 
-@jax.jit
 def dominant_frequency(
     x: jnp.ndarray,
     axis: int = -1,
@@ -196,7 +194,6 @@ def dominant_frequency(
     return dom_freq
 
 
-@jax.jit
 def spectral_centroid(
     x: jnp.ndarray,
     axis: int = -1,
@@ -231,7 +228,6 @@ def spectral_centroid(
     return centroid
 
 
-@jax.jit
 def spectral_bandwidth(
     x: jnp.ndarray,
     axis: int = -1,
@@ -271,7 +267,6 @@ def spectral_bandwidth(
     return bandwidth
 
 
-@jax.jit
 def spectral_slope(
     x: jnp.ndarray,
     axis: int = -1,
@@ -315,7 +310,6 @@ def spectral_slope(
     return slope
 
 
-@jax.jit
 def spectral_rolloff(
     x: jnp.ndarray,
     axis: int = -1,
@@ -359,7 +353,6 @@ def spectral_rolloff(
     return rolloff_freq
 
 
-@jax.jit
 def spectral_flux(
     x: jnp.ndarray,
     axis: int = -1,
@@ -370,15 +363,16 @@ def spectral_flux(
     """
     Compute the spectral flux (rate of change of spectrum over time).
     
-    Spectral flux measures the rate of change of the power spectrum
-    and is useful for detecting onset events.
+    The spectral flux measures how quickly the power spectrum changes
+    over time. It is computed as the sum of positive differences between
+    consecutive power spectra.
     
     Args:
         x: Input signal
         axis: Axis along which to compute the spectral flux
         fs: Sampling frequency
         window_length: Length of the window for spectral analysis
-        hop_length: Hop length between successive windows
+        hop_length: Hop length for sliding window
         
     Returns:
         Spectral flux array
@@ -387,29 +381,19 @@ def spectral_flux(
         window_length = min(64, x.shape[axis])
     
     if hop_length is None:
-        hop_length = window_length // 4
-    
-    # Compute short-time Fourier transform
-    freqs, times, stft = signal.stft(
-        x,
-        fs=fs,
-        window='hann',
-        nperseg=window_length,
-        noverlap=window_length - hop_length,
-        axis=axis
-    )
+        hop_length = window_length // 2
     
     # Compute power spectrum
-    power = jnp.abs(stft)**2
+    freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
     
-    # Compute spectral flux
-    diff_power = jnp.diff(power, axis=-1)
-    flux = jnp.sum(jnp.maximum(diff_power, 0), axis=-2)
+    # Compute spectral flux as the sum of positive differences
+    # between consecutive frames
+    diff_psd = jnp.diff(psd, axis=axis)
+    flux = jnp.sum(jnp.maximum(diff_psd, 0), axis=axis)
     
     return flux
 
 
-@jax.jit
 def spectral_flatness(
     x: jnp.ndarray,
     axis: int = -1,
@@ -417,10 +401,11 @@ def spectral_flatness(
     window_length: Optional[int] = None
 ) -> jnp.ndarray:
     """
-    Compute the spectral flatness (Wiener entropy).
+    Compute the spectral flatness (measure of how noise-like the spectrum is).
     
-    Spectral flatness is a measure of how noise-like vs. tonal a signal is.
-    A higher spectral flatness indicates more noise-like characteristics.
+    The spectral flatness is the ratio of the geometric mean to the
+    arithmetic mean of the power spectrum. It ranges from 0 (tonal)
+    to 1 (noise-like).
     
     Args:
         x: Input signal
@@ -437,11 +422,9 @@ def spectral_flatness(
     # Compute power spectrum
     freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
     
-    # Avoid log(0) by adding small epsilon
-    psd_eps = psd + 1e-10
-    
     # Compute spectral flatness
-    geometric_mean = jnp.exp(jnp.mean(jnp.log(psd_eps), axis=axis))
+    # Geometric mean / Arithmetic mean
+    geometric_mean = jnp.exp(jnp.mean(jnp.log(psd + 1e-10), axis=axis))
     arithmetic_mean = jnp.mean(psd, axis=axis)
     
     flatness = geometric_mean / (arithmetic_mean + 1e-10)
@@ -449,7 +432,6 @@ def spectral_flatness(
     return flatness
 
 
-@jax.jit
 def spectral_contrast(
     x: jnp.ndarray,
     axis: int = -1,
@@ -458,10 +440,10 @@ def spectral_contrast(
     n_bands: int = 6
 ) -> jnp.ndarray:
     """
-    Compute the spectral contrast.
+    Compute the spectral contrast (difference between peaks and valleys).
     
-    Spectral contrast considers the spectral peak, spectral valley, and
-    their difference in each frequency subband.
+    The spectral contrast measures the difference in dB between
+    peaks and valleys in the spectrum across different frequency bands.
     
     Args:
         x: Input signal
@@ -479,29 +461,32 @@ def spectral_contrast(
     # Compute power spectrum
     freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
     
-    # Create frequency bands
-    n_freqs = freqs.shape[0]
-    band_size = n_freqs // n_bands
+    # Divide spectrum into bands
+    n_bins = psd.shape[axis]
+    band_size = n_bins // n_bands
     
-    contrast = []
+    contrasts = []
     for i in range(n_bands):
         start_idx = i * band_size
-        end_idx = (i + 1) * band_size if i < n_bands - 1 else n_freqs
+        end_idx = min((i + 1) * band_size, n_bins)
         
-        band_psd = psd[start_idx:end_idx]
+        # Extract band
+        if axis == 0:
+            band_psd = psd[start_idx:end_idx]
+        elif axis == 1:
+            band_psd = psd[:, start_idx:end_idx]
+        else:  # axis == -1 or axis == 2
+            band_psd = psd[..., start_idx:end_idx]
         
         # Compute contrast for this band
-        sorted_band = jnp.sort(band_psd, axis=0)
-        peak = jnp.mean(sorted_band[-band_size//10:], axis=0)  # Top 10%
-        valley = jnp.mean(sorted_band[:band_size//10], axis=0)  # Bottom 10%
-        
-        band_contrast = jnp.log(peak / (valley + 1e-10) + 1e-10)
-        contrast.append(band_contrast)
+        peak = jnp.max(band_psd, axis=axis)
+        valley = jnp.mean(band_psd, axis=axis)
+        contrast = 20 * jnp.log10((peak + 1e-10) / (valley + 1e-10))
+        contrasts.append(contrast)
     
-    return jnp.stack(contrast, axis=0)
+    return jnp.stack(contrasts, axis=axis)
 
 
-@jax.jit
 def zero_crossing_rate(
     x: jnp.ndarray,
     axis: int = -1,
@@ -509,37 +494,46 @@ def zero_crossing_rate(
     hop_length: int = 512
 ) -> jnp.ndarray:
     """
-    Compute the zero-crossing rate of the signal.
+    Compute the zero-crossing rate.
     
     The zero-crossing rate is the rate at which the signal changes sign.
-    It is a simple measure of the noisiness of the signal.
+    It is commonly used to distinguish between voiced and unvoiced speech.
     
     Args:
         x: Input signal
         axis: Axis along which to compute the zero-crossing rate
-        frame_length: Length of the frame for analysis
-        hop_length: Hop length between successive frames
+        frame_length: Length of each frame
+        hop_length: Hop length between frames
         
     Returns:
         Zero-crossing rate array
     """
     # Compute sign changes
-    sign_changes = jnp.diff(jnp.sign(x), axis=axis)
+    signs = jnp.sign(x)
+    sign_changes = jnp.abs(jnp.diff(signs, axis=axis))
     
-    # Count zero crossings in frames
-    n_frames = (x.shape[axis] - frame_length) // hop_length + 1
-    zcr = jnp.zeros(x.shape[:-1] + (n_frames,))
+    # Count zero crossings in each frame
+    n_samples = x.shape[axis]
+    n_frames = (n_samples - frame_length) // hop_length + 1
     
+    zcr = []
     for i in range(n_frames):
         start = i * hop_length
         end = start + frame_length
-        frame_changes = sign_changes[..., start:end-1]
-        zcr = zcr.at[..., i].set(jnp.sum(jnp.abs(frame_changes), axis=axis) / (2 * frame_length))
+        
+        if axis == 0:
+            frame_changes = sign_changes[start:end]
+        elif axis == 1:
+            frame_changes = sign_changes[:, start:end]
+        else:  # axis == -1 or axis == 2
+            frame_changes = sign_changes[..., start:end]
+        
+        frame_zcr = jnp.sum(frame_changes, axis=axis) / frame_length
+        zcr.append(frame_zcr)
     
-    return zcr
+    return jnp.stack(zcr, axis=axis)
 
 
-@jax.jit
 def spectral_energy(
     x: jnp.ndarray,
     axis: int = -1,
@@ -548,14 +542,17 @@ def spectral_energy(
     freq_range: Optional[Tuple[float, float]] = None
 ) -> jnp.ndarray:
     """
-    Compute the spectral energy in a specific frequency range.
+    Compute the spectral energy within a frequency range.
+    
+    The spectral energy is the sum of the power spectrum within
+    a specified frequency range.
     
     Args:
         x: Input signal
         axis: Axis along which to compute the spectral energy
         fs: Sampling frequency
         window_length: Length of the window for spectral analysis
-        freq_range: Tuple of (low_freq, high_freq) for energy calculation
+        freq_range: Frequency range (min_freq, max_freq) in Hz
         
     Returns:
         Spectral energy array
@@ -566,20 +563,24 @@ def spectral_energy(
     # Compute power spectrum
     freqs, psd = power_spectrum(x, axis=axis, nperseg=window_length, fs=fs)
     
+    # Apply frequency range filter if specified
     if freq_range is not None:
-        low_freq, high_freq = freq_range
-        freq_mask = (freqs >= low_freq) & (freqs <= high_freq)
-        psd_masked = jnp.where(freq_mask, psd, 0)
-    else:
-        psd_masked = psd
+        min_freq, max_freq = freq_range
+        freq_mask = (freqs >= min_freq) & (freqs <= max_freq)
+        
+        if axis == 0:
+            psd = psd[freq_mask]
+        elif axis == 1:
+            psd = psd[:, freq_mask]
+        else:  # axis == -1 or axis == 2
+            psd = psd[..., freq_mask]
     
-    # Compute total energy
-    energy = jnp.sum(psd_masked, axis=axis)
+    # Compute spectral energy
+    energy = jnp.sum(psd, axis=axis)
     
     return energy
 
 
-@jax.jit
 def peak_frequency(
     x: jnp.ndarray,
     axis: int = -1,
@@ -616,7 +617,6 @@ def peak_frequency(
     return peak_freq
 
 
-@jax.jit 
 def _spectral_decomposition_jit(
     x: jnp.ndarray,
     window: jnp.ndarray,
@@ -625,7 +625,7 @@ def _spectral_decomposition_jit(
     axis: int
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    JIT-compiled core spectral decomposition function.
+    Core spectral decomposition function (removed JIT for axis compatibility).
     """
     # Handle specific axis cases to avoid moveaxis in JIT
     if axis == -1 or axis == x.ndim - 1:
