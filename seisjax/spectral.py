@@ -71,7 +71,9 @@ def _power_spectrum_jit(
     elif axis == 1:
         x_padded = jnp.pad(x, ((0, 0), (0, nperseg), *(((0, 0),) * (x.ndim - 2))))
     else:  # axis == -1 or axis == 2
-        if x.ndim == 2:
+        if x.ndim == 1:
+            x_padded = jnp.pad(x, ((0, nperseg),))
+        elif x.ndim == 2:
             x_padded = jnp.pad(x, ((0, 0), (0, nperseg)))
         else:  # 3D case
             x_padded = jnp.pad(x, ((0, 0), (0, 0), (0, nperseg)))
@@ -83,15 +85,29 @@ def _power_spectrum_jit(
         # Use lax.dynamic_slice for JAX-compatible slicing with traced indices
         if axis == 0:
             # Extract segment along first axis
-            segment = lax.dynamic_slice(x_padded, (start_idx,), (nperseg,))
-            windowed = segment * window
+            if x.ndim == 1:
+                segment = lax.dynamic_slice(x_padded, (start_idx,), (nperseg,))
+                windowed = segment * window
+            elif x.ndim == 2:
+                segment = lax.dynamic_slice(x_padded, (start_idx, 0), (nperseg, x.shape[1]))
+                windowed = segment * window[:, None]
+            else:  # 3D case
+                segment = lax.dynamic_slice(x_padded, (start_idx, 0, 0), (nperseg, x.shape[1], x.shape[2]))
+                windowed = segment * window[:, None, None]
         elif axis == 1:
             # Extract segment along second axis
-            segment = lax.dynamic_slice(x_padded, (0, start_idx), (x.shape[0], nperseg))
-            windowed = segment * window[None, :]
+            if x.ndim == 2:
+                segment = lax.dynamic_slice(x_padded, (0, start_idx), (x.shape[0], nperseg))
+                windowed = segment * window[None, :]
+            else:  # 3D case
+                segment = lax.dynamic_slice(x_padded, (0, start_idx, 0), (x.shape[0], nperseg, x.shape[2]))
+                windowed = segment * window[None, :, None]
         else:  # axis == -1 or axis == 2
             # Extract segment along last axis
-            if x.ndim == 2:
+            if x.ndim == 1:
+                segment = lax.dynamic_slice(x_padded, (start_idx,), (nperseg,))
+                windowed = segment * window
+            elif x.ndim == 2:
                 segment = lax.dynamic_slice(x_padded, (0, start_idx), (x.shape[0], nperseg))
                 windowed = segment * window
             else:  # 3D case
