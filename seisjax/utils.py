@@ -63,7 +63,7 @@ def _gradient_1d(f: jnp.ndarray) -> jnp.ndarray:
     
     def grad_two_points():
         diff_val = f[1] - f[0]
-        return jnp.array([diff_val, diff_val])
+        return jnp.full_like(f, diff_val)
     
     def grad_normal():
         # Forward difference for first point
